@@ -49,8 +49,8 @@ This project implements a voice assistant using LiveKit's Voice Pipeline Agent. 
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/your-repo/your-project.git
-cd your-project
+git clone https://github.com/Michael233ctrl/livekit-flask-tts-agent.git
+cd livekit-flask-tts-agent
 ```
 
 ### 2. Set up environment variables
