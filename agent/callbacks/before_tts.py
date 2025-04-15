@@ -1,12 +1,10 @@
 import logging
+from typing import Any, AsyncIterable, Dict, Optional
+
 import aiohttp
-from typing import Dict, Any, AsyncIterable, Optional
-
-from config import settings
 from callbacks.utils import estimate_audio_length
-
+from config import settings
 from livekit.agents.pipeline import VoicePipelineAgent
-
 
 logger = logging.getLogger(__name__)
 
@@ -23,18 +21,19 @@ async def _send_validation_request(
     Returns:
         The response data if the request is successful, None otherwise.
     """
-    if not settings.USE_EXTERNAL_VALIDATION or not settings.FLASK_SERVER_URL:
-        return
+    if not settings.AUDIO_SERVER_URL:
+        logger.warning("AUDIO_SERVER_URL not configured")
+        return None
+    
+    endpoint = f"{settings.AUDIO_SERVER_URL}/validate_audio_length"
+    logger.info(f"Sending validation request to {endpoint}")
 
-    logger.info(
-        f"Sending request to the {settings.FLASK_SERVER_URL}/validate_audio_length"
-    )
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{settings.FLASK_SERVER_URL}/validate_audio_length",
+                endpoint,
                 json=validation_data,
-                timeout=aiohttp.ClientTimeout(total=3.0),
+                timeout=aiohttp.ClientTimeout(total=5.0),
             ) as response:
                 if response.status == 200:
                     return await response.json()
@@ -43,10 +42,42 @@ async def _send_validation_request(
                     logger.warning(
                         f"Text validation failed with status {response.status}: {error_msg}"
                     )
+                    return None
     except aiohttp.ClientError as e:
         logger.error(f"HTTP error while validating text: {str(e)}")
+        return None
     except Exception as e:
         logger.exception(f"Unexpected error during text validation: {str(e)}")
+        return None
+
+
+async def _collect_streaming_text(text_stream: AsyncIterable[str]) -> str:
+    """
+    Collects all chunks from an AsyncIterable text stream into a single string.
+    
+    Args:
+        text_stream: AsyncIterable of text chunks
+        
+    Returns:
+        Complete text as a single string
+    """
+    chunks = []
+    async for chunk in text_stream:
+        chunks.append(chunk)
+    return "".join(chunks)
+
+
+async def _create_text_stream(text: str) -> AsyncIterable[str]:
+    """
+    Creates an AsyncIterable stream from a string.
+    
+    Args:
+        text: String to convert to an AsyncIterable stream
+        
+    Returns:
+        AsyncIterable of the text
+    """
+    yield text
 
 
 async def before_tts_callback(
@@ -65,64 +96,51 @@ async def before_tts_callback(
     if not text:
         logger.warning("No text provided for TTS")
         return text
-
-    if isinstance(text, str):
-        log_text = text
-    else:
-        log_text = "(streaming text)"  # Log in case of streaming
-
-    logger.info(f"Processing TTS text (length: {len(log_text)} chars)")
+    
+    # Handle both string and streaming text
+    is_streaming = not isinstance(text, str)
+    if is_streaming:
+        # For streaming text, collect all chunks to process together
+        original_stream = text
+        text = await _collect_streaming_text(original_stream)
+        logger.info(f"Collected streaming text (length: {len(text)} chars)")
 
     # Estimate audio length
-    if isinstance(text, str):
-        estimated_length = estimate_audio_length(
-            text, words_per_minute=settings.DEFAULT_VOICE_WPM
-        )
-    else:
-        estimated_length = 0.0  # For streaming, we don't know the length
-
+    estimated_length = estimate_audio_length(
+        text, words_per_minute=settings.DEFAULT_VOICE_WPM
+    )
     logger.info(f"Estimated audio length: {estimated_length:.2f} seconds")
 
-    # Prepare data for external validation
+    # Prepare data for Flask server validation
     validation_data = {
-        "text": text if isinstance(text, str) else "(streaming text)",
+        "text": text,
         "estimated_length": estimated_length,
-        "context": {  #  Populate context as best as possible.
-            "session_id": getattr(
-                agent, "sid", "unknown"
-            ),  # Try to get session ID from Agent
-            "user_id": getattr(agent, "participant_identity", "unknown"),
-            "room_name": getattr(agent, "room_name", "unknown"),
-        },
+        "max_length": 60.0  # 60 seconds max length
     }
-    # Send to external validation server if configured
-    response_data = None  # await _send_validation_request(validation_data)
 
-    if response_data:
-        if isinstance(text, str):
-            # Check if the server modified the text
-            if response_data.get("text") != text:
-                logger.info("Text modified by validation server")
-                text = response_data["text"]
-                validation_data["text"] = text  # update
-                # Re-estimate with new text
-                estimated_length = estimate_audio_length(
-                    text, words_per_minute=settings.DEFAULT_VOICE_WPM
-                )
-                validation_data["estimated_length"] = estimated_length
-        else:
-            logger.info("Text modified by validation server")
-            text = response_data["text"]  # hope server returns a stream
-            validation_data["text"] = "(streaming text)"
+    # Send to validation server
+    response_data = await _send_validation_request(validation_data)
+    if response_data and "text" in response_data:
+        # Server may have modified the text if too long
+        modified_text = response_data["text"]
+        if modified_text != text:
+            logger.info("Text modified by validation server (likely trimmed)")
+            text = modified_text
 
-    if isinstance(text, str):
-        log_text = text
+            # Re-estimate with the modified text
+            new_estimated_length = estimate_audio_length(
+                text, words_per_minute=settings.DEFAULT_VOICE_WPM
+            )
+            logger.info(
+                f"New estimated audio length after modification: {new_estimated_length:.2f} seconds"
+            )
     else:
-        log_text = "(streaming text)"
-    # Log the final text and estimated length
-    logger.info(
-        f"Final text length: {len(log_text)} chars, "
-        f"estimated duration: {estimated_length:.2f} seconds"
-    )
+        logger.warning("Failed to validate with server, using original text")
 
-    return text
+    # Return in same format as received
+    if is_streaming:
+        logger.info(f"Returning text as AsyncIterable (length: {len(text)} chars)")
+        return _create_text_stream(text)
+    else:
+        logger.info(f"Final text length: {len(text)} chars")
+        return text

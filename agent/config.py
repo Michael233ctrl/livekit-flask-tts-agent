@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
-load_dotenv("../.env.local")
+load_dotenv()
 
 
 class Settings(BaseSettings):
@@ -29,9 +29,12 @@ class Settings(BaseSettings):
     DEFAULT_VOICE_WPM: int = Field(
         150, description="Default words per minute for speech"
     )
+    MAX_AUDIO_LENGTH: float = Field(
+        60.0, description="Maximum audio length in seconds for validation"
+    )
 
     # External Services
-    FLASK_SERVER_URL: Optional[str] = Field(
+    AUDIO_SERVER_URL: Optional[str] = Field(
         None, description="URL for Flask validation server"
     )
     USE_EXTERNAL_VALIDATION: bool = Field(

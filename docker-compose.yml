@@ -15,6 +15,8 @@ services:
     env_file:
       - .env.local
     restart: unless-stopped
+    networks:
+      - livekit_voice_pipeline
 
   frontend:
     build:
@@ -37,3 +39,9 @@ services:
     ports:
       - "5000:5000"
     restart: unless-stopped
+    networks:
+      - livekit_voice_pipeline
+  
+networks:
+  livekit_voice_pipeline:
+    driver: bridge
