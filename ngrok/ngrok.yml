@@ -1,0 +1,6 @@
+version: "2"
+authtoken: ${NGROK_AUTHTOKEN}
+tunnels:
+  flask:
+    proto: http
+    addr: audio_server:5000
