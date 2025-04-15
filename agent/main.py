@@ -1,7 +1,6 @@
 import asyncio
 import json
-import os
-import requests
+import logging
 
 from livekit import rtc
 from livekit.agents import JobContext, WorkerOptions, cli, JobProcess
@@ -11,33 +10,65 @@ from livekit.agents.llm import (
 )
 from livekit.agents.pipeline import VoicePipelineAgent
 from livekit.agents.log import logger
-from livekit.plugins import deepgram, silero, cartesia, openai
+from livekit.plugins import deepgram, silero, cartesia, openai, google
 from typing import List, Any
 
-from dotenv import load_dotenv
+from config import settings
+from callbacks import before_tts_callback
 
-load_dotenv()
+
+logging.basicConfig(
+    level=getattr(logging, settings.LOG_LEVEL),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 
 
 def prewarm(proc: JobProcess):
-    # preload models when process starts to speed up first interaction
+    """
+    Preload models and resources when the process starts.
+
+    Args:
+        proc: The job process object for storing preloaded resources
+    """
+    logger.info("Prewarming models and resources...")
+
+    # Preload VAD model
     proc.userdata["vad"] = silero.VAD.load()
+    logger.info("VAD model loaded")
 
-    # fetch cartesia voices
-
+    # Fetch available voices from Cartesia
     headers = {
-        "X-API-Key": os.getenv("CARTESIA_API_KEY", ""),
+        "X-API-Key": settings.CARTESIA_API_KEY,
         "Cartesia-Version": "2024-08-01",
         "Content-Type": "application/json",
     }
-    response = requests.get("https://api.cartesia.ai/voices", headers=headers)
-    if response.status_code == 200:
-        proc.userdata["cartesia_voices"] = response.json()
-    else:
-        logger.warning(f"Failed to fetch Cartesia voices: {response.status_code}")
+
+    try:
+        import requests
+
+        response = requests.get("https://api.cartesia.ai/voices", headers=headers)
+        if response.status_code == 200:
+            proc.userdata["cartesia_voices"] = response.json()
+            logger.info(
+                f"Fetched {len(proc.userdata['cartesia_voices'])} Cartesia voices"
+            )
+        else:
+            logger.warning(f"Failed to fetch Cartesia voices: {response.status_code}")
+            proc.userdata["cartesia_voices"] = []
+    except Exception as e:
+        logger.error(f"Error fetching Cartesia voices: {str(e)}")
+        proc.userdata["cartesia_voices"] = []
 
 
 async def entrypoint(ctx: JobContext):
+    """
+    Main entry point for the voice assistant agent.
+
+    Args:
+        ctx: The job context for the agent
+    """
+    logger.info(f"Starting voice assistant in room: {ctx.room.name}")
+
     initial_ctx = ChatContext(
         messages=[
             ChatMessage(
@@ -54,9 +85,10 @@ async def entrypoint(ctx: JobContext):
     agent = VoicePipelineAgent(
         vad=ctx.proc.userdata["vad"],
         stt=deepgram.STT(),
-        llm=openai.LLM(model="gpt-4o-mini"),
+        llm=google.LLM(model="gemini-2.0-flash"),
         tts=tts,
         chat_ctx=initial_ctx,
+        before_tts_cb=before_tts_callback,
     )
 
     is_user_speaking = False
@@ -134,5 +166,17 @@ async def entrypoint(ctx: JobContext):
     await agent.say("Hi there, how are you doing today?", allow_interruptions=True)
 
 
+def main():
+    """Main entry point for the CLI application."""
+    try:
+        logger.info("Starting LiveKit Voice Assistant")
+        cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
+    except KeyboardInterrupt:
+        logger.info("Voice assistant terminated by user")
+    except Exception as e:
+        logger.error(f"Unhandled exception: {str(e)}")
+        raise
+
+
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, prewarm_fnc=prewarm))
+    main()

@@ -4,5 +4,10 @@ livekit-plugins-deepgram<1.0.0
 livekit-plugins-silero<1.0.0
 livekit-plugins-cartesia<1.0.0
 livekit-plugins-turn-detector<1.0.0
+livekit-plugins-google==0.11.3
 python-dotenv
 requests
+pydantic==2.10.6
+pydantic-settings==2.4.0
+python-dotenv==1.1.0
+aiohttp==3.11.16
