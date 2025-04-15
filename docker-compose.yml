@@ -6,6 +6,8 @@ services:
       context: ./agent
       dockerfile: Dockerfile
     container_name: agent
+    volumes:
+      - ./agent:/app
     ports:
       - "7880:7880"
       - "7881:7881"
@@ -19,8 +21,19 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: frontend
+    volumes:
+      - ./frontend:/app
     ports:
       - "3000:3000"
     env_file:
       - .env.local
+    restart: unless-stopped
+  
+  audio_server:
+    build: ./audio_server
+    container_name: audio_server
+    volumes:
+      - ./audio_server:/app
+    ports:
+      - "5000:5000"
     restart: unless-stopped
