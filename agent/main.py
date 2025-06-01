@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import time
 
 from livekit import rtc
 from livekit.agents import JobContext, WorkerOptions, cli, JobProcess
@@ -43,21 +44,37 @@ def prewarm(proc: JobProcess):
         "Content-Type": "application/json",
     }
 
-    try:
-        import requests
+    import requests
+    max_retries = 3
+    retry_delay = 3  # seconds
+    proc.userdata["cartesia_voices"] = [] # Default to empty list
 
-        response = requests.get("https://api.cartesia.ai/voices", headers=headers)
-        if response.status_code == 200:
-            proc.userdata["cartesia_voices"] = response.json()
-            logger.info(
-                f"Fetched {len(proc.userdata['cartesia_voices'])} Cartesia voices"
+    for attempt in range(max_retries):
+        logger.info(f"Attempt {attempt + 1}/{max_retries} to fetch Cartesia voices...")
+        try:
+            response = requests.get("https://api.cartesia.ai/voices", headers=headers, timeout=10)
+            if response.status_code == 200:
+                proc.userdata["cartesia_voices"] = response.json()
+                logger.info(
+                    f"Fetched {len(proc.userdata['cartesia_voices'])} Cartesia voices successfully."
+                )
+                break  # Success, exit loop
+            else:
+                logger.warning(
+                    f"Attempt {attempt + 1} failed to fetch Cartesia voices: HTTP {response.status_code}"
+                )
+        except requests.exceptions.RequestException as e:
+            logger.warning(
+                f"Attempt {attempt + 1} failed to fetch Cartesia voices: {str(e)}"
             )
+
+        if attempt < max_retries - 1:
+            logger.info(f"Waiting {retry_delay} seconds before next retry...")
+            time.sleep(retry_delay)
         else:
-            logger.warning(f"Failed to fetch Cartesia voices: {response.status_code}")
-            proc.userdata["cartesia_voices"] = []
-    except Exception as e:
-        logger.error(f"Error fetching Cartesia voices: {str(e)}")
-        proc.userdata["cartesia_voices"] = []
+            logger.error(
+                "All attempts to fetch Cartesia voices failed. Proceeding with empty voice list."
+            )
 
 
 async def entrypoint(ctx: JobContext):
@@ -77,16 +94,34 @@ async def entrypoint(ctx: JobContext):
             )
         ]
     )
-    cartesia_voices: List[dict[str, Any]] = ctx.proc.userdata["cartesia_voices"]
+    cartesia_voices: List[dict[str, Any]] = ctx.proc.userdata.get("cartesia_voices", []) # Ensure it exists
 
-    tts = cartesia.TTS(
-        model="sonic-2",
-    )
+    stt_plugin = None
+    llm_plugin = None
+    tts_plugin = None
+
+    try:
+        stt_plugin = deepgram.STT()
+    except Exception as e:
+        logger.critical(f"CRITICAL: Failed to initialize Deepgram STT: {e}")
+
+    try:
+        llm_plugin = google.LLM(model="gemini-2.0-flash")
+    except Exception as e:
+        logger.critical(f"CRITICAL: Failed to initialize Google LLM: {e}")
+
+    try:
+        tts_plugin = cartesia.TTS(model="sonic-2")
+    except Exception as e:
+        logger.critical(f"CRITICAL: Failed to initialize Cartesia TTS: {e}")
+        # If TTS fails, we might not be able to say anything, but let agent try to start.
+        # A more robust solution might be to prevent agent start or use a fallback TTS.
+
     agent = VoicePipelineAgent(
         vad=ctx.proc.userdata["vad"],
-        stt=deepgram.STT(),
-        llm=google.LLM(model="gemini-2.0-flash"),
-        tts=tts,
+        stt=stt_plugin,
+        llm=llm_plugin,
+        tts=tts_plugin,
         chat_ctx=initial_ctx,
         before_tts_cb=before_tts_callback,
     )
@@ -120,13 +155,20 @@ async def entrypoint(ctx: JobContext):
                 language = "en"
                 if "language" in voice_data and voice_data["language"] != "en":
                     language = voice_data["language"]
-                tts._opts.voice = voice_data["embedding"]
-                tts._opts.language = language
-                # allow user to confirm voice change as long as no one is speaking
-                if not (is_agent_speaking or is_user_speaking):
-                    asyncio.create_task(
-                        agent.say("How do I sound now?", allow_interruptions=True)
-                    )
+                if tts_plugin: # Check if tts_plugin was initialized
+                    tts_plugin._opts.voice = voice_data["embedding"]
+                    tts_plugin._opts.language = language
+                    # allow user to confirm voice change as long as no one is speaking
+                    if not (is_agent_speaking or is_user_speaking):
+                        try:
+                            asyncio.create_task(
+                                agent.say("How do I sound now?", allow_interruptions=True)
+                            )
+                        except Exception as e:
+                            logger.warning(f"agent.say() failed during voice change confirmation: {e}")
+                else:
+                    logger.warning("TTS plugin not available, cannot confirm voice change.")
+
 
     await ctx.connect()
 
@@ -163,7 +205,10 @@ async def entrypoint(ctx: JobContext):
     await ctx.room.local_participant.set_attributes({"voices": json.dumps(voices)})
 
     agent.start(ctx.room)
-    await agent.say("Hi there, how are you doing today?", allow_interruptions=True)
+    try:
+        await agent.say("Hi there, how are you doing today?", allow_interruptions=True)
+    except Exception as e:
+        logger.warning(f"agent.say() failed for initial greeting: {e}")
 
 
 def main():

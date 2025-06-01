@@ -1,4 +1,5 @@
 import logging
+import asyncio # Required for asyncio.sleep
 from typing import Any, AsyncIterable, Dict, Optional
 
 import aiohttp
@@ -26,29 +27,43 @@ async def _send_validation_request(
         return None
     
     endpoint = f"{settings.AUDIO_SERVER_URL}/validate_audio_length"
-    logger.info(f"Sending validation request to {endpoint}")
+    max_retries = 3
+    retry_delay = 2  # seconds
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                endpoint,
-                json=validation_data,
-                timeout=aiohttp.ClientTimeout(total=5.0),
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    error_msg = await response.text()
-                    logger.warning(
-                        f"Text validation failed with status {response.status}: {error_msg}"
-                    )
-                    return None
-    except aiohttp.ClientError as e:
-        logger.error(f"HTTP error while validating text: {str(e)}")
-        return None
-    except Exception as e:
-        logger.exception(f"Unexpected error during text validation: {str(e)}")
-        return None
+    for attempt in range(max_retries):
+        logger.info(f"Attempt {attempt + 1}/{max_retries} to send validation request to {endpoint}")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    endpoint,
+                    json=validation_data,
+                    timeout=aiohttp.ClientTimeout(total=5.0),
+                ) as response:
+                    if response.status == 200:
+                        logger.info(f"Validation request successful (Attempt {attempt + 1}).")
+                        return await response.json()
+                    else:
+                        error_msg = await response.text()
+                        logger.warning(
+                            f"Attempt {attempt + 1} for text validation failed with status {response.status}: {error_msg}"
+                        )
+        except aiohttp.ClientError as e:
+            logger.warning(
+                f"Attempt {attempt + 1} for text validation failed with HTTP error: {str(e)}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"Attempt {attempt + 1} for text validation failed with unexpected error: {str(e)}"
+            )
+
+        if attempt < max_retries - 1:
+            logger.info(f"Waiting {retry_delay} seconds before next retry...")
+            await asyncio.sleep(retry_delay)
+        else:
+            logger.error(
+                f"All {max_retries} attempts to send validation request failed."
+            )
+            return None
 
 
 async def _collect_streaming_text(text_stream: AsyncIterable[str]) -> str:
@@ -62,8 +77,13 @@ async def _collect_streaming_text(text_stream: AsyncIterable[str]) -> str:
         Complete text as a single string
     """
     chunks = []
-    async for chunk in text_stream:
-        chunks.append(chunk)
+    try:
+        async for chunk in text_stream:
+            chunks.append(chunk)
+    except Exception as e:
+        logger.error(f"Error encountered while collecting streaming text: {e}")
+        # Depending on desired behavior, you might want to re-raise or handle differently
+        # For now, we return partially collected chunks.
     return "".join(chunks)
 
 
